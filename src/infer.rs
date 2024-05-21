@@ -3,27 +3,37 @@ use crate::ast::*;
 use std::collections::HashMap;
 
 #[derive(Clone, Debug)]
-pub struct UnifyEnv(HashMap<TypeParam, Type>);
+pub struct UnifyEnv(HashMap<usize, Type<usize>>);
 impl UnifyEnv {
     pub fn new() -> Self {
         Self(HashMap::new())
     }
-    pub fn resolve<'a>(&'a self, ty: &'a Type) -> &'a Type {
-        if let Type::Param(p) = ty {
-            if let Some(res) = self.0.get(p) {
-                return self.resolve(res);
+    pub fn resolve<'a>(&self, ty: &Type<usize>) -> Type<usize> {
+        match ty {
+            Type::Type(n, p) => {
+                Type::Type(n.clone(), p.into_iter().map(|p| self.resolve(p)).collect())
             }
+            Type::Func(a, r) => Type::Func(
+                a.into_iter().map(|a| self.resolve(a)).collect(),
+                Box::new(self.resolve(r)),
+            ),
+            Type::Param(p) => {
+                if let Some(res) = self.0.get(&p) {
+                    self.resolve(res)
+                } else {
+                    ty.clone()
+                }
+            }
+            Type::Inferred => Type::Inferred,
         }
-        ty
     }
-    pub fn unify(&mut self, ty1: &Type, ty2: &Type) -> Result<Type, String> {
+    pub fn unify(&mut self, ty1: &Type<usize>, ty2: &Type<usize>) -> Result<Type<usize>, String> {
         let ty1 = self.resolve(ty1).clone();
         let ty2 = self.resolve(ty2).clone();
         match (&ty1, &ty2) {
             (Type::Param(p1), Type::Param(p2)) if p1 == p2 => Ok(ty2),
             (Type::Param(p), _) => {
-                self.0.insert(p.clone(), ty2.clone());
-                println!("{:?}", self);
+                self.0.insert(*p, ty2.clone());
                 Ok(ty2)
             }
             (_, Type::Param(_)) => self.unify(&ty2, &ty1),
@@ -47,7 +57,7 @@ impl UnifyEnv {
                     .zip(a2.iter())
                     .map(|(a1, a2)| self.unify(a1, a2))
                     .collect::<Result<Vec<_>, _>>()?;
-                let r = self.unify(r1, r2)?;
+                let r = self.unify(&r1, &r2)?;
                 Ok(Type::Func(a, Box::new(r)))
             }
             (Type::Inferred, _) => Ok(ty2),
@@ -60,42 +70,43 @@ impl UnifyEnv {
 #[derive(Clone, Debug)]
 pub struct VarEnv {
     var: HashMap<Var, Type<usize>>,
-    type_params: Vec<Type>,
+    ue: UnifyEnv,
+    var_id: usize,
 }
 impl VarEnv {
     pub fn new() -> Self {
         Self {
             var: HashMap::new(),
-            type_params: Vec::new(),
+            ue: UnifyEnv::new(),
+            var_id: 0,
         }
     }
-    pub fn get<N>(&self, name: N) -> Option<&Type<usize>>
-    where
-        N: Into<Var>,
-    {
-        self.var.get(&name.into())
+    fn new_type_var(&mut self) -> usize {
+        let index = self.var_id;
+        self.var_id += 1;
+        index
     }
-    fn index_type_param(&mut self, params: &mut Vec<TypeParam>, ty: Type) -> Type<usize> {
+    fn index_type_param(&mut self, map: &mut HashMap<TypeParam, usize>, ty: Type) -> Type<usize> {
         match ty {
             Type::Type(n, p) => Type::Type(
-                n,
+                n.clone(),
                 p.into_iter()
-                    .map(|p| self.index_type_param(params, p))
+                    .map(|p| self.index_type_param(map, p))
                     .collect(),
             ),
             Type::Func(a, r) => Type::Func(
                 a.into_iter()
-                    .map(|a| self.index_type_param(params, a))
+                    .map(|a| self.index_type_param(map, a))
                     .collect(),
-                Box::new(self.index_type_param(params, *r)),
+                Box::new(self.index_type_param(map, *r)),
             ),
-            Type::Param(p) => {
-                if let Some(index) = params.iter().position(|pp| p == *pp) {
-                    Type::Param(self.type_params.len() + index)
+            Type::Param(ref p) => {
+                if let Some(index) = map.get(&p) {
+                    Type::Param(*index)
                 } else {
-                    let index = params.len();
-                    params.push(p);
-                    Type::Param(self.type_params.len() + index)
+                    let index = self.new_type_var();
+                    map.insert(p.clone(), index);
+                    Type::Param(index)
                 }
             }
             Type::Inferred => Type::Inferred,
@@ -105,28 +116,50 @@ impl VarEnv {
     where
         N: Into<Var>,
     {
-        let mut vec = Vec::new();
-        let res = self.index_type_param(&mut vec, ty);
-        self.type_params.extend_from_slice(vec.as_slice());
+        let res = self.index_type_param(&mut HashMap::new(), ty);
         self.var.insert(name.into(), res);
     }
-    pub fn infer(&mut self, ue: &mut UnifyEnv, e: &Expression) -> Result<Type, String> {
+    pub fn clone_param(&mut self, map: &mut HashMap<usize, usize>, ty: Type<usize>) -> Type<usize> {
+        match ty {
+            Type::Type(n, p) => {
+                Type::Type(n, p.into_iter().map(|p| self.clone_param(map, p)).collect())
+            }
+            Type::Func(a, r) => Type::Func(
+                a.into_iter().map(|a| self.clone_param(map, a)).collect(),
+                Box::new(self.clone_param(map, *r)),
+            ),
+            Type::Param(p) => {
+                if let Some(index) = map.get(&p) {
+                    Type::Param(*index)
+                } else {
+                    let new = self.new_type_var();
+                    map.insert(p, new);
+                    Type::Param(new)
+                }
+            }
+            Type::Inferred => Type::Inferred,
+        }
+    }
+    pub fn infer(&mut self, e: &Expression) -> Result<Type<usize>, String> {
         match e {
             Expression::Var(var) => self
-                .0
+                .var
                 .get(var)
                 .clone()
                 .ok_or("variable not found".to_owned())
-                .map(|ty| ue.resolve(&ty))
+                //.map(|ty| ue.resolve(&ty))
                 .cloned(),
             Expression::Call { func, params } => {
                 let f = self.var.get(func).cloned();
                 if let Some(f) = f {
+                    let f = self.clone_param(&mut HashMap::new(), f);
                     let args = params
                         .iter()
-                        .map(|e| self.infer(ue, e))
+                        .map(|e| self.infer(e))
                         .collect::<Result<Vec<_>, _>>()?;
-                    let ty = ue.unify(&f, &Type::Func(args, Box::new(Type::Inferred)))?;
+                    let ty = self
+                        .ue
+                        .unify(&f, &Type::Func(args, Box::new(Type::Inferred)))?;
                     if let Type::Func(_, ret) = ty {
                         Ok(*ret.clone())
                     } else {
@@ -139,12 +172,8 @@ impl VarEnv {
         }
     }
     pub fn statement(&mut self, stmt: &Statement) -> Result<(), String> {
-        println!("stmt");
-        let mut ue = UnifyEnv::new();
-        let ty = self.infer(&mut ue, &stmt.expr)?;
-        println!("ue: {:?}", ue);
-        println!("{}", ty);
-        self.0.insert(stmt.var.clone(), ty);
+        let ty = self.infer(&stmt.expr)?;
+        self.var.insert(stmt.var.clone(), self.ue.resolve(&ty));
         Ok(())
     }
     pub fn analyze(&mut self, prog: &Program) -> Result<(), String> {
@@ -154,8 +183,8 @@ impl VarEnv {
         Ok(())
     }
     pub fn print(&self) {
-        for (k, v) in self.0.iter() {
-            println!("{}: {}", k.0, v);
+        for (k, v) in self.var.iter() {
+            println!("{}: {}", k.0, self.ue.resolve(v));
         }
     }
 }

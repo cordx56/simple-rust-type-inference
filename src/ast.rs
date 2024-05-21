@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct TypeName(pub String);
 impl<S> From<S> for TypeName
@@ -13,45 +11,55 @@ where
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct TypeParam(pub String);
-impl<S> From<S> for TypeParam
-where
-    S: ToString,
-{
-    fn from(value: S) -> Self {
+impl TypeParam {
+    pub fn from<S>(value: S) -> Self
+    where
+        S: ToString,
+    {
         Self(value.to_string())
+    }
+}
+impl std::fmt::Display for TypeParam {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub enum Type<R = TypeParam> {
-    Type(TypeName, Vec<Type<R>>),
-    Func(Vec<Type<R>>, Box<Type<R>>),
-    Param(R),
+pub enum Type<P = TypeParam> {
+    Type(TypeName, Vec<Type<P>>),
+    Func(Vec<Type<P>>, Box<Type<P>>),
+    Param(P),
     Inferred,
 }
-impl Type<TypeParam> {
-    pub fn ty<N, P>(name: N, params: P) -> Self
+impl<P> Type<P> {
+    pub fn ty<N, Q>(name: N, params: Q) -> Self
     where
         N: Into<TypeName>,
-        P: IntoIterator<Item = Type>,
+        Q: IntoIterator<Item = Type<P>>,
     {
         let params = params.into_iter().collect();
         Self::Type(name.into(), params)
     }
     pub fn func<A>(args: A, ret: Self) -> Self
     where
-        A: IntoIterator<Item = Type>,
+        A: IntoIterator<Item = Type<P>>,
     {
         Self::Func(args.into_iter().collect(), Box::new(ret))
     }
-    pub fn param<P>(param: P) -> Self
+}
+impl Type<TypeParam> {
+    pub fn param<S>(param: S) -> Self
     where
-        P: Into<TypeParam>,
+        S: ToString,
     {
-        Self::Param(param.into())
+        Self::Param(TypeParam::from(param))
     }
 }
-impl std::fmt::Display for Type {
+impl<P> std::fmt::Display for Type<P>
+where
+    P: std::fmt::Display,
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Type::Type(name, params) => {
@@ -78,7 +86,7 @@ impl std::fmt::Display for Type {
                 write!(f, ") -> {}", ret)?;
                 Ok(())
             }
-            Type::Param(param) => write!(f, "{}", param.0),
+            Type::Param(param) => write!(f, "{}", param),
             Type::Inferred => {
                 write!(f, "_")
             }
@@ -97,58 +105,6 @@ where
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct Function {
-    name: Var,
-    type_params: Vec<TypeParam>,
-    param_types: Vec<Type>,
-    ret: Type,
-}
-impl Function {
-    pub fn new<N, P, T>(name: N, type_params: P, param_types: T, ret: Type) -> Self
-    where
-        N: Into<Var>,
-        P: IntoIterator<Item = TypeParam>,
-        T: IntoIterator<Item = Type>,
-    {
-        let name = name.into();
-        let type_params = type_params.into_iter().collect();
-        let param_types = param_types.into_iter().collect();
-        Self {
-            name,
-            type_params,
-            param_types,
-            ret,
-        }
-    }
-}
-
-pub struct Definitions {
-    types: HashMap<TypeName, Type>,
-    funcs: HashMap<Var, Function>,
-}
-impl Definitions {
-    pub fn new() -> Self {
-        Self {
-            types: HashMap::new(),
-            funcs: HashMap::new(),
-        }
-    }
-
-    pub fn ty<N>(&self, name: N) -> Option<&Type>
-    where
-        N: Into<TypeName>,
-    {
-        self.types.get(&name.into())
-    }
-    pub fn func<N>(&self, name: N) -> Option<&Function>
-    where
-        N: Into<Var>,
-    {
-        self.funcs.get(&name.into())
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct Program(pub Vec<Statement>);
 impl FromIterator<Statement> for Program {
@@ -163,8 +119,14 @@ pub struct Statement {
     pub expr: Expression,
 }
 impl Statement {
-    pub fn new(var: Var, expr: Expression) -> Self {
-        Self { var, expr }
+    pub fn new<V>(var: V, expr: Expression) -> Self
+    where
+        V: Into<Var>,
+    {
+        Self {
+            var: var.into(),
+            expr,
+        }
     }
 }
 
